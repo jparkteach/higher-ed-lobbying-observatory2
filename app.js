@@ -7,7 +7,12 @@ const fmt=new Intl.NumberFormat('en-US'), num=n=>fmt.format(n), money=n=>'$'+num
 const opt=(v,t)=>'<option value="'+esc(v)+'">'+esc(t)+'</option>';
 const table=(head,body)=>'<table><thead><tr>'+head.map(x=>'<th scope="col">'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+body.map(row=>'<tr>'+row.map(x=>'<td>'+x+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
 const none=t=>'<p class="empty">'+t+'</p>';
-let selection=[], annual=new Map(), view='trends', page=0, profile=[];
+const dashboardViews = ['trends', 'funding', 'campuses', 'models'];
+function linkedView() {
+ const target = window.location.hash.slice(1);
+ return dashboardViews.includes(target) ? target : null;
+}
+let selection=[], annual=new Map(), view=linkedView() || 'trends', page=0, profile=[];
 function counters(){return {n:0,obs:0,reg:0,paid:0,dollars:0}}
 function add(a,r){a.n++;if(r[5]!==null){a.obs++;a.reg+=r[5]}if(r[6]!==null){a.paid++;a.dollars+=r[6]}}
 function aggregate(data){const m=new Map();for(const r of data){const k=r[1]*3+r[4];if(!m.has(k))m.set(k,counters());add(m.get(k),r)}return m}
@@ -89,11 +94,75 @@ function details(id){
  $('detailtable').innerHTML=table(['Year','Campus name','Registered','2014 dollars','Assignment','Pell share','R&D share','Reviewed group key','Camp group ID'],recs.map(r=>[r[1],esc(nameOf(r)),r[5]===null?'Pending':r[5]?'Yes':'No',r[6]===null?(r[1]>=2023?'Pending':'Missing'):money(r[6]),esc(r[9].replaceAll('_',' '))+(r[19]?' · zero convention':'')+(r[20]?' · source discrepancy':''),r[7]===null?'—':r[7].toFixed(2)+'%',r[8]===null?'—':r[8].toFixed(2)+'%',esc(r[10]),esc(r[11])]));
  $('detail').showModal()
 }
-function modelView(){
- const t=$('outcome').value,s=$('sample').value,fit=fits.find(f=>f.table===t&&f.sample===s);
- const labels={RD:'Federal R&D share',Pell:'Pell share',private:'Private college',forprofit:'For-profit college',landgrant:'Land grant',hbcu:'HBCU',carnegie:'Doctoral institution',aau:'AAU membership',hospital:'Hospital',medical:'Medical program',enroll1000:'Enrollment / 1,000',budget100m:'Budget / $100m',Constant:'Intercept'};
- const lines=models.filter(r=>r.table===t&&r.sample===s).map(r=>[labels[r.term],r.estimate===''?'Omitted':t==='20'?(+r.estimate<.005?Number(r.estimate).toPrecision(2):Number(r.estimate).toFixed(2)):money(+r.estimate),r.standard_error===''?'—':t==='20'?Number(r.standard_error).toFixed(2):money(+r.standard_error),r.p_value===''?'—':+r.p_value<.001?'&lt;0.001':Number(r.p_value).toFixed(3)]);
- $('modeldata').innerHTML='<p><strong>'+num(+fit.n)+' original analysis units</strong> · '+esc(fit.fit_statistic)+' '+Number(fit.fit).toFixed(2)+'</p><div class="scroll">'+table(['Predictor',t==='20'?'Odds ratio':'Spending coefficient','Standard error','p-value'],lines)+'</div><p class="caption">Budget shares run from 0 to 1. '+(t==='20'?'Raise a share’s odds ratio to the power 0.01 for a one-percentage-point change.':'Multiply a share’s coefficient by 0.01 for a one-percentage-point change.')+(s==='System'&&t==='20'?' All 36 systems with AAU membership or a medical program registered, leaving 94 systems in this model.':'')+'</p>';
+const periods = ['2004–2014', '2015–2022'];
+const termLabels = {
+ RD:'Federal R&D share (+1 percentage point)', Pell:'Pell share (+1 percentage point)',
+ private:'Private nonprofit', forprofit:'For-profit', landgrant:'Land-grant institution',
+ hbcu:'Historically Black college or university', carnegie:'Doctoral institution', aau:'AAU membership',
+ hospital:'Hospital', medical:'Medical program', enroll1000:'Undergraduate enrollment (+1,000 FTE)',
+ budget100m:'Budget (+$100 million)', Constant:'Intercept'
+};
+const sampleReadings = {
+ All:{
+  registered:'A larger federal R&D share predicted higher registration odds in both periods. A larger Pell share predicted lower odds in 2004–2014. The later Pell estimate also points downward, but its interval includes an odds ratio of 1.',
+  spend:'Each additional percentage point of federal R&D funding was associated with $2,426 more in annual spending in the original period and $6,541 more in the later period. The Pell estimates were inconclusive in both.'
+ },
+ Standalone:{
+  registered:'For standalone institutions, higher R&D dependence predicted higher registration odds in both periods. Pell dependence predicted lower odds in the earlier period. The later Pell interval includes an odds ratio of 1.',
+  spend:'For standalone institutions, a one-point increase in federal R&D share was associated with $2,936 more in annual spending in the earlier period and $5,895 more in the later period. Neither period shows a clear Pell association.'
+ },
+ System:{
+  registered:'Among systems, neither period shows a clear relationship between funding dependence and registration. Both the R&D and Pell intervals include an odds ratio of 1 in each period.',
+  spend:'The later estimate links a one-point increase in federal R&D share to $12,383 more in annual spending. Its conventional p-value is 0.008, but its robust p-value is 0.156. The earlier R&D estimate and both Pell estimates are inconclusive.'
+ }
+};
+function displayEstimate(value, outcome) {
+ const n = Number(value);
+ if (outcome === 'spend') return new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits:0}).format(n);
+ return n > 0 && n < 0.001 ? n.toExponential(1) : n.toFixed(3);
+}
+function estimateCell(row) {
+ if (row.effect === '') return '<em>Omitted</em>';
+ const format = x => displayEstimate(x, row.outcome);
+ const p = Number(row.p) < 0.001 ? 'p &lt; 0.001' : 'p = ' + Number(row.p).toFixed(3);
+ return '<strong>' + format(row.effect) + '</strong><small>95% CI ' + format(row.low95) + ' to ' + format(row.high95) + '</small><small>' + p + '</small>';
+}
+function comparisonTable(title, headings, body) {
+ return '<table class="model-table"><caption>'+esc(title)+'</caption><thead><tr>'+headings.map(h=>'<th scope="col">'+esc(h)+'</th>').join('')+
+  '</tr></thead><tbody>'+body.map(([label,...cells])=>'<tr><th scope="row">'+esc(label)+'</th>'+cells.map(cell=>'<td>'+cell+'</td>').join('')+'</tr>').join('')+'</tbody></table>';
+}
+function sectorTable() {
+ const lines = [];
+ for (const [sector, share] of [['Nonprofit','R&D'], ['For-profit','Pell']]) {
+  for (const outcome of ['registered','spend']) {
+   const label = sector + ' ' + share + ' · ' + (outcome === 'spend' ? 'annual spending' : 'registration odds ratio');
+   const cells = periods.map(period => estimateCell(OBS.sectorTests.find(r => r.period === period && r.sector === sector && r.outcome === outcome)));
+   lines.push([label,...cells]);
+  }
+ }
+ return comparisonTable('Adjusted sector-specific estimates', ['Sector and outcome', ...periods], lines);
+}
+function modelView() {
+ const sample = $('sample').value, outcome = $('outcome').value;
+ const registration = outcome === 'registered';
+ const fitRows = periods.map(period => fits.find(f => f.sample === sample && f.outcome === outcome && f.period === period));
+ const coeffs = models.filter(r => r.sample === sample && r.outcome === outcome);
+ const fitLabel = registration ? 'McFadden pseudo-R²' : 'R²';
+ const lines = [
+  ['Analysis units', ...fitRows.map(r=>num(+r.n))],
+  [fitLabel, ...fitRows.map(r=>(+r.fit).toFixed(3))]
+ ];
+ for (const [term, label] of Object.entries(termLabels)) {
+  lines.push([label, ...periods.map(period => estimateCell(coeffs.find(r => r.period === period && r.term === term)))]);
+ }
+ const units = registration
+  ? 'Odds ratios above 1 indicate higher odds of registering at least once during the period. An odds ratio of 1 indicates equal odds.'
+  : 'Estimates show the difference in average annual lobbying spending in 2014 dollars, including institutions with zero spending. Models use recorded amounts before the chart’s 49% public-campus adjustment.';
+ const systemNote = sample === 'System' && registration ? '<p class="caption">All 36 historical systems with AAU membership or a medical program registered. Those characteristics perfectly predicted registration. The original model therefore used 94 of 130 systems and omitted those two coefficients.</p>' : '';
+ const title = $('sample').selectedOptions[0].textContent+' · '+(registration ? 'registration odds ratios' : 'annual spending in 2014 dollars');
+ $('modelreading').textContent = sampleReadings[sample][outcome];
+ $('modeldata').innerHTML = '<p class="caption">'+units+' Intervals and p-values use Camp’s conventional standard errors. Other predictors are held constant.</p><div class="scroll">'+comparisonTable(title, ['Predictor or model statistic', ...periods], lines)+'</div>'+systemNote;
+ if (!$('sectorresults').hasChildNodes()) $('sectorresults').innerHTML = sectorTable();
 }
 function exportRows(){
  const header=['unit_id','year','campus','state','sector','registered','spending_2014usd','pell_dependence_pct','rd_dependence_pct','assignment','corrected_group','reconstructed_camp_group','reviewed_groups','doctoral','landgrant','hbcu','hospital','aau','medical','zero_by_convention','old_amount_conflict'];
@@ -106,6 +175,10 @@ $('state').innerHTML=opt('','All locations')+[...new Set(rows.map(r=>r[3]))].sor
 for(const id of ['from','to','sector','state'])$(id).onchange=()=>{if(+$('from').value>+$('to').value){if(id==='from')$('to').value=$('from').value;else $('from').value=$('to').value}recalc()};
 $('reset').onclick=()=>{$('from').value=2004;$('to').value=2024;$('state').value='';$('sector').value='';$('search').value='';recalc()};
 $('export').onclick=exportRows;$('metric').onchange=trends;$('fund').onchange=funding;$('cap').onchange=funding;$('sample').onchange=modelView;$('outcome').onchange=modelView;$('close').onclick=()=>$('detail').close();$('search').oninput=()=>{page=0;campuses()};
-document.addEventListener('click',evt=>{const e=evt.target.closest('[data-view],[data-id],[data-page]');if(!e)return;if(e.dataset.view){view=e.dataset.view;render()}else if(e.dataset.id)details(+e.dataset.id);else{page+=+e.dataset.page;campuses()}});
+document.addEventListener('click',evt=>{const e=evt.target.closest('[data-view],[data-id],[data-page]');if(!e)return;if(e.dataset.view){view=e.dataset.view;if(linkedView()!==view)window.history.pushState(null,'','#'+view);render()}else if(e.dataset.id)details(+e.dataset.id);else{page+=+e.dataset.page;campuses()}});
 let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(render,120)});
+window.addEventListener('hashchange',()=>{
+ const target = linkedView() || (window.location.hash === '' ? 'trends' : null);
+ if (target && target !== view) { view=target; render(); }
+});
 showHeat();recalc();
